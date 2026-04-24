@@ -2,84 +2,88 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-    <title>Cutlery Pronunciation Quiz | xAPI LRS</title>
-    <!-- Google Fonts & Font Awesome Icons -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,600;14..32,700&display=swap" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cutlery Speak Lab | xAPI Pro</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-    <!-- Local CSS -->
     <link rel="stylesheet" href="style.css">
-    <!-- TinCanJS for xAPI (cargado con defer para no bloquear) -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/tin-canjs/1.3.2/tincan-min.js" defer></script>
 </head>
 <body>
 
-<!-- MODAL for Name & Email capture -->
+<!-- User Modal (Nautical Style Logic) -->
 <div id="learnerModal" class="modal">
     <div class="modal-content">
         <div class="modal-header">
-            <i class="fas fa-user-graduate"></i>
-            <h2>Welcome to Cutlery Pronunciation Lab</h2>
+            <i class="fas fa-utensils"></i>
+            <h2>Cutlery Pronunciation Lab</h2>
         </div>
-        <p>Please enter your details to begin. Your progress will be recorded in the Learning Record Store.</p>
+        <p>Master kitchen vocabulary. Your progress is tracked via xAPI.</p>
         <div class="input-group">
-            <label><i class="fas fa-user"></i> Full Name</label>
-            <input type="text" id="learnerName" placeholder="e.g., Maria Gonzalez" autocomplete="name">
+            <label>Full Name</label>
+            <input type="text" id="userName" placeholder="e.g. John Doe">
         </div>
         <div class="input-group">
-            <label><i class="fas fa-envelope"></i> Email Address</label>
-            <input type="email" id="learnerEmail" placeholder="maria@example.com" autocomplete="email">
+            <label>Email Address</label>
+            <input type="email" id="userEmail" placeholder="e.g. john@example.com">
         </div>
-        <button id="startQuizBtn" class="modal-btn">Start Pronunciation Quiz →</button>
+        <button id="startBtn" class="modal-btn">Start Practice Session</button>
         <div id="modalError" class="error-message"></div>
     </div>
 </div>
 
-<!-- MAIN QUIZ CONTAINER (hidden until start) -->
+<!-- Main App (Hybrid UI) -->
 <div class="quiz-container" id="quizApp" style="display: none;">
     <div class="quiz-header">
-        <div class="logo">
-            <i class="fas fa-utensils"></i>
-            <span>cutlery·speak</span>
+        <div class="logo"><i class="fas fa-microphone-lines"></i> <span>cutlery·speak</span></div>
+        <div class="question-counter" id="counterDisplay">1 / 5</div>
+    </div>
+
+    <!-- Nautical Style Dashboard -->
+    <div class="progress-dashboard">
+        <div class="stat-card">
+            <span class="stat-label">Correct</span>
+            <span class="stat-value success" id="correct-count">0</span>
         </div>
-        <div class="question-counter" id="counterDisplay">Question 1 / 5</div>
+        <div class="stat-card">
+            <span class="stat-label">Accuracy</span>
+            <span class="stat-value" id="accuracy-rate">0%</span>
+        </div>
+        <button id="end-session-btn" class="end-btn">End Session</button>
     </div>
 
     <div class="question-area">
         <div class="question-icon" id="questionIcon">🍴</div>
-        <div class="question-text" id="questionText">What do you use to cut meat?</div>
+        <div class="question-text" id="questionText">...</div>
         <div class="options-list" id="optionsContainer"></div>
     </div>
 
-    <!-- Pronunciation ring + speech controls -->
     <div class="pronounce-section">
         <div class="ring-widget">
             <canvas id="ringCanvas" width="140" height="140"></canvas>
             <div class="ring-percentage" id="ringPercentText">0%</div>
         </div>
         <div class="speak-panel">
-            <div class="expected-badge">
-                <i class="fas fa-bullhorn"></i>
-                <span>🎯 say this:</span>
+            <div id="targetPhrasePreview" class="target-card" style="display: none;">
+                <small>🎯 TARGET PHRASE:</small>
+                <div id="targetText">...</div>
             </div>
-            <!-- HINT: initially hidden (style="display: none;") -->
-            <div style="font-weight: 700; background: #fff0e4; padding: 0.3rem 0.8rem; border-radius: 40px; font-size: 1rem; margin-bottom: 12px; display: none;" id="targetPhrasePreview">I use a knife.</div>
-            <button class="btn-speak" id="speakBtn">
-                <i class="fas fa-microphone-alt"></i> Speak answer
+            <button class="btn-speak" id="record-btn">
+                <i class="fas fa-microphone"></i> <span>Tap to Speak</span>
             </button>
-            <div class="recording-status" id="recordingStatus">🎤 ready</div>
-            <div class="user-transcript" id="transcriptBox">📝 your speech will appear here</div>
-            <div class="feedback-text" id="levFeedback"></div>
+            <div class="status-group">
+                <div class="recording-status" id="status-text">🎤 ready</div>
+                <div class="user-transcript" id="transcriptBox">Awaiting speech...</div>
+            </div>
         </div>
     </div>
 
     <div class="nav-buttons">
-        <button class="nav-btn" id="prevBtn"><i class="fas fa-arrow-left"></i> Previous</button>
-        <button class="nav-btn primary" id="nextBtn">Next <i class="fas fa-arrow-right"></i></button>
+        <button class="nav-btn" id="prevBtn"><i class="fas fa-chevron-left"></i> Prev</button>
+        <div class="lrs-indicator" id="lrs-status"><i class="fas fa-circle"></i> LRS Linked</div>
+        <button class="nav-btn primary" id="nextBtn">Next <i class="fas fa-chevron-right"></i></button>
     </div>
 </div>
 
-<!-- Tu script (con las correcciones que te entregué) -->
 <script src="script.js"></script>
 </body>
 </html>
