@@ -1,9 +1,9 @@
 // =========================== LRS CONFIGURATION ===========================
 // EDIT THESE THREE VALUES BEFORE DEPLOYING (provided by your LRS.io account)
 const LRS_CONFIG = {
-    endpoint: "https://your-lrs.lrs.io/xapi/",   // <-- replace with your LRS endpoint
-    username: "your_username",                   // <-- basic auth user
-    password: "your_password"                    // <-- basic auth pass
+    endpoint: "https://armada-lrs.lrs.io/xapi/",   // <-- replace with your LRS endpoint
+    username: "123456",                   // <-- basic auth user
+    password: "123456"                    // <-- basic auth pass
 };
 // =========================================================================
 
