@@ -1,347 +1,207 @@
-// =========================== LRS CONFIGURATION ===========================
-// EDIT THESE THREE VALUES BEFORE DEPLOYING (provided by your LRS.io account)
+// =========================== CONFIGURATION ===========================
 const LRS_CONFIG = {
-    endpoint: "https://armada-lrs.lrs.io/xapi/",   // <-- replace with your LRS endpoint
-    username: "123456",                   // <-- basic auth user
-    password: "123456"                    // <-- basic auth pass
+    endpoint: "https://armada-lrs.lrs.io/xapi/", // Change this to your LRS
+    auth: "Basic " + btoa("123456:123456")        // Change to your key:secret
 };
-// =========================================================================
 
-// Global variables
-let learner = { name: "", email: "" };
-let tincan = null;          // TinCan agent & LRS connection
-let currentQuestionIndex = 0;
-let quizData = null;
-let recognition = null;
-let isListening = false;
-let currentTargetAnswer = "";
-let hintRevealedForCurrentQuestion = false;
-let firstAttemptMade = false;
-
-// Quiz questions
 const QUIZ_DATA = [
-    { id: 1, text: "What do you use to cut meat?", icon: "🥩", options: ["I use a knife.", "I use a fork.", "I use a towel."], correctAnswer: "I use a knife.", vocabKey: "knife" },
-    { id: 2, text: "What do you use to eat soup?", icon: "🥣", options: ["I use a spoon.", "I use a fork.", "I use chopsticks."], correctAnswer: "I use a spoon.", vocabKey: "spoon" },
-    { id: 3, text: "What do you use to spread butter on bread?", icon: "🍞🧈", options: ["I use a butter knife.", "I use a spatula.", "I use a ladle."], correctAnswer: "I use a butter knife.", vocabKey: "butter knife" },
-    { id: 4, text: "What do you use to flip pancakes?", icon: "🥞", options: ["I use a spatula.", "I use a whisk.", "I use tongs."], correctAnswer: "I use a spatula.", vocabKey: "spatula" },
-    { id: 5, text: "What do you use to measure small amounts of ingredients?", icon: "🥄⚖️", options: ["I use measuring spoons.", "I use a measuring cup.", "I use a kitchen scale."], correctAnswer: "I use measuring spoons.", vocabKey: "measuring spoons" }
+    { id: 1, text: "What do you use to cut meat?", icon: "🥩", options: ["I use a knife.", "I use a fork.", "I use a towel."], correctAnswer: "I use a knife." },
+    { id: 2, text: "What do you use to eat soup?", icon: "🥣", options: ["I use a spoon.", "I use a fork.", "I use chopsticks."], correctAnswer: "I use a spoon." },
+    { id: 3, text: "What do you use to spread butter?", icon: "🍞", options: ["I use a butter knife.", "I use a spatula.", "I use a ladle."], correctAnswer: "I use a butter knife." },
+    { id: 4, text: "What do you use to flip pancakes?", icon: "🥞", options: ["I use a spatula.", "I use a whisk.", "I use tongs."], correctAnswer: "I use a spatula." },
+    { id: 5, text: "What do you use to measure ingredients?", icon: "🥄", options: ["I use measuring spoons.", "I use a cup.", "I use a scale."], correctAnswer: "I use measuring spoons." }
 ];
 
-// Helper: Levenshtein distance
-function levenshteinDistance(a, b) {
-    if (a.length === 0) return b.length;
-    if (b.length === 0) return a.length;
+// =========================== STATE ===========================
+let currentUser = { name: "", email: "" };
+let sessionId = "sess-" + Date.now();
+let currentQuestionIndex = 0;
+let recognition = null;
+let isRecording = false;
+let stats = { total: 0, correct: 0 };
+
+// =========================== LRS LOGIC (NAUTICAL STYLE) ===========================
+async function sendXAPI(statement) {
+    try {
+        const response = await fetch(LRS_CONFIG.endpoint + 'statements', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': LRS_CONFIG.auth,
+                'X-Experience-API-Version': '1.0.3'
+            },
+            body: JSON.stringify(statement)
+        });
+        if (response.ok) document.getElementById('lrs-status').classList.add('active');
+    } catch (e) { console.error("LRS Error", e); }
+}
+
+function getBaseStatement(verbName, verbId) {
+    return {
+        actor: { name: currentUser.name, mbox: "mailto:" + currentUser.email },
+        verb: { id: verbId, display: { "en-US": verbName } },
+        timestamp: new Date().toISOString(),
+        context: { extensions: { "https://lab.edu/session": sessionId } }
+    };
+}
+
+// =========================== SPEECH LOGIC ===========================
+function calculateSimilarity(str1, str2) {
+    const n = (s) => s.toLowerCase().replace(/[^\w\s]/g, '').trim();
+    const a = n(str1), b = n(str2);
     const matrix = Array(b.length + 1).fill(null).map(() => Array(a.length + 1).fill(null));
     for (let i = 0; i <= a.length; i++) matrix[0][i] = i;
     for (let j = 0; j <= b.length; j++) matrix[j][0] = j;
     for (let j = 1; j <= b.length; j++) {
         for (let i = 1; i <= a.length; i++) {
-            const substitutionCost = a[i-1] === b[j-1] ? 0 : 1;
-            matrix[j][i] = Math.min(
-                matrix[j][i-1] + 1,
-                matrix[j-1][i] + 1,
-                matrix[j-1][i-1] + substitutionCost
-            );
+            const cost = a[i-1] === b[j-1] ? 0 : 1;
+            matrix[j][i] = Math.min(matrix[j][i-1]+1, matrix[j-1][i]+1, matrix[j-1][i-1]+cost);
         }
     }
-    return matrix[b.length][a.length];
+    return Math.round((1 - matrix[b.length][a.length] / Math.max(a.length, b.length)) * 100);
 }
 
-function normalizeForComparison(str) {
-    return str.toLowerCase().replace(/[.,!?;:()"'\-]/g, ' ').replace(/\s+/g, ' ').trim();
+function initSpeech() {
+    const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Speech) return;
+    recognition = new Speech();
+    recognition.lang = 'en-US';
+    recognition.maxAlternatives = 3; // Nautical logic: check multiple guesses
+
+    recognition.onstart = () => {
+        isRecording = true;
+        document.getElementById('record-btn').classList.add('recording');
+        document.getElementById('status-text').innerText = "Listening...";
+    };
+
+    recognition.onresult = (event) => {
+        const alternatives = event.results[0];
+        const target = QUIZ_DATA[currentQuestionIndex].correctAnswer;
+        
+        // Nautical strategy: Find the best match among alternatives
+        let bestScore = 0;
+        let bestTranscript = alternatives[0].transcript;
+
+        for (let i = 0; i < alternatives.length; i++) {
+            let s = calculateSimilarity(alternatives[i].transcript, target);
+            if (s > bestScore) {
+                bestScore = s;
+                bestTranscript = alternatives[i].transcript;
+            }
+        }
+
+        handleSpeechResult(bestTranscript, bestScore);
+    };
+
+    recognition.onend = () => {
+        isRecording = false;
+        document.getElementById('record-btn').classList.remove('recording');
+        document.getElementById('status-text').innerText = "🎤 ready";
+    };
 }
 
-function computeSimilarityPercent(spokenRaw, targetRaw) {
-    const spokenNorm = normalizeForComparison(spokenRaw);
-    const targetNorm = normalizeForComparison(targetRaw);
-    if (targetNorm.length === 0) return 0;
-    const distance = levenshteinDistance(spokenNorm, targetNorm);
-    const maxLen = Math.max(spokenNorm.length, targetNorm.length);
-    if (maxLen === 0) return 100;
-    return Math.round((1 - distance / maxLen) * 100);
+function handleSpeechResult(spoken, score) {
+    document.getElementById('transcriptBox').innerText = `"${spoken}"`;
+    drawRing(score);
+    
+    const isCorrect = score >= 80;
+    stats.total++;
+    if (isCorrect) stats.correct++;
+    updateDashboard();
+
+    if (score < 90) document.getElementById('targetPhrasePreview').style.display = 'block';
+
+    // Send Answer Statement
+    let stmt = getBaseStatement("answered", "http://adlnet.gov/expapi/verbs/answered");
+    stmt.object = { id: "https://lab.edu/cutlery/q" + QUIZ_DATA[currentQuestionIndex].id };
+    stmt.result = {
+        success: isCorrect,
+        score: { scaled: score/100, raw: score },
+        response: spoken
+    };
+    sendXAPI(stmt);
 }
 
-// Ring drawing
-const canvas = document.getElementById('ringCanvas');
-const ctx = canvas.getContext('2d');
+// =========================== UI & NAV ===========================
 function drawRing(percent) {
-    const centerX = 70, centerY = 70, radius = 62, lineWidth = 12;
-    const startAngle = -0.5 * Math.PI;
-    const endAngle = startAngle + (percent / 100) * 2 * Math.PI;
+    const canvas = document.getElementById('ringCanvas');
+    const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, 140, 140);
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
-    ctx.strokeStyle = "#e9dfd3";
-    ctx.lineWidth = lineWidth;
-    ctx.stroke();
-    const gradient = ctx.createLinearGradient(20, 20, 120, 120);
-    if (percent >= 85) gradient.addColorStop(0, '#2c8c3e'), gradient.addColorStop(1, '#4cae51');
-    else if (percent >= 50) gradient.addColorStop(0, '#e6b422'), gradient.addColorStop(1, '#f5b042');
-    else gradient.addColorStop(0, '#cf7f5e'), gradient.addColorStop(1, '#e09e7a');
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, radius, startAngle, endAngle);
-    ctx.strokeStyle = gradient;
-    ctx.lineWidth = lineWidth;
-    ctx.lineCap = 'round';
-    ctx.stroke();
-    document.getElementById('ringPercentText').innerText = `${Math.floor(percent)}%`;
-}
-function updateRingPercent(percent) { drawRing(percent); }
-
-// ---------- xAPI statement helpers (con manejo de errores) ----------
-function initXAPI() {
-    // Verificar si TinCan está disponible
-    if (typeof TinCan === 'undefined') {
-        console.warn("TinCan.js no está cargado. Las declaraciones xAPI no se enviarán.");
-        return null;
-    }
-    if (!LRS_CONFIG.endpoint || LRS_CONFIG.endpoint === "https://your-lrs.lrs.io/xapi/") {
-        console.warn("LRS no configurado. Las declaraciones xAPI no se enviarán.");
-        return null;
-    }
-    try {
-        const lrs = new TinCan.LRS({
-            endpoint: LRS_CONFIG.endpoint,
-            username: LRS_CONFIG.username,
-            password: LRS_CONFIG.password,
-            allowFail: true
-        });
-        console.log("LRS inicializado correctamente");
-        return lrs;
-    } catch (error) {
-        console.error("Error al inicializar LRS:", error);
-        return null;
-    }
+    ctx.beginPath(); ctx.arc(70, 70, 60, 0, 2*Math.PI);
+    ctx.strokeStyle = "#eee"; ctx.lineWidth = 10; ctx.stroke();
+    ctx.beginPath(); ctx.arc(70, 70, 60, -Math.PI/2, (-Math.PI/2) + (percent/100 * 2*Math.PI));
+    ctx.strokeStyle = percent > 80 ? "#4CAF50" : (percent > 40 ? "#FFC107" : "#F44336");
+    ctx.lineWidth = 10; ctx.lineCap = "round"; ctx.stroke();
+    document.getElementById('ringPercentText').innerText = percent + "%";
 }
 
-function getAgent() {
-    return new TinCan.Agent({
-        name: learner.name,
-        mbox: `mailto:${learner.email}`
-    });
+function updateDashboard() {
+    document.getElementById('correct-count').innerText = stats.correct;
+    const rate = stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0;
+    document.getElementById('accuracy-rate').innerText = rate + "%";
 }
 
-function sendStatement(verbId, objectId, resultObj = null, extensions = {}) {
-    if (!tincan) {
-        console.warn("No hay conexión LRS, no se envía statement");
-        return Promise.resolve();
-    }
-    try {
-        const actor = getAgent();
-        const verb = new TinCan.Verb({ id: verbId });
-        const object = new TinCan.Activity({ id: objectId, definition: { name: { "en-US": "Pronunciation Quiz" } } });
-        const statement = new TinCan.Statement({ actor, verb, object });
-        if (resultObj) {
-            statement.result = new TinCan.Result(resultObj);
-            if (Object.keys(extensions).length) statement.result.extensions = extensions;
-        }
-        return tincan.saveStatement(statement).catch(err => console.warn("xAPI error:", err));
-    } catch (e) {
-        console.error("Error construyendo statement:", e);
-        return Promise.resolve();
-    }
-}
-
-function sendPronunciationStatement(questionId, vocabKey, spokenText, targetText, scorePercent) {
-    const activityId = window.location.href + "#question/" + questionId;
-    const result = {
-        score: { scaled: scorePercent / 100, raw: scorePercent, min: 0, max: 100 },
-        success: scorePercent >= 80,
-        completion: true
-    };
-    const extensions = {
-        "https://cutleryquiz.com/extensions/spoken_text": spokenText,
-        "https://cutleryquiz.com/extensions/target_sentence": targetText,
-        "https://cutleryquiz.com/extensions/vocabulary_item": vocabKey,
-        "https://cutleryquiz.com/extensions/question_text": QUIZ_DATA[questionId-1].text
-    };
-    sendStatement("http://adlnet.gov/expapi/verbs/answered", activityId, result, extensions);
-}
-
-// Mostrar la pista (solo después del primer error)
-function showHint() {
-    const hintEl = document.getElementById('targetPhrasePreview');
-    if (hintEl && hintEl.style.display === 'none') {
-        hintEl.style.display = 'block';
-        hintRevealedForCurrentQuestion = true;
-    }
-}
-
-function resetHintForNewQuestion() {
-    const hintEl = document.getElementById('targetPhrasePreview');
-    if (hintEl) hintEl.style.display = 'none';
-    hintRevealedForCurrentQuestion = false;
-    firstAttemptMade = false;
-}
-
-// Cargar pregunta
 function loadQuestion(index) {
     const q = QUIZ_DATA[index];
     document.getElementById('questionText').innerText = q.text;
     document.getElementById('questionIcon').innerText = q.icon;
-    currentTargetAnswer = q.correctAnswer;
-    const hintEl = document.getElementById('targetPhrasePreview');
-    hintEl.innerText = `"${currentTargetAnswer}"`;
-    resetHintForNewQuestion();
+    document.getElementById('targetText').innerText = q.correctAnswer;
+    document.getElementById('targetPhrasePreview').style.display = 'none';
+    document.getElementById('counterDisplay').innerText = `${index+1} / ${QUIZ_DATA.length}`;
     
-    const optionsContainer = document.getElementById('optionsContainer');
-    optionsContainer.innerHTML = '';
-    q.options.forEach((opt, optIdx) => {
-        const letter = String.fromCharCode(65 + optIdx);
+    const container = document.getElementById('optionsContainer');
+    container.innerHTML = '';
+    q.options.forEach((opt, i) => {
         const div = document.createElement('div');
         div.className = 'option-item';
-        div.innerHTML = `<div class="option-letter">${letter}</div><div class="option-text">${opt}</div>`;
-        optionsContainer.appendChild(div);
+        div.innerHTML = `<span class="option-letter">${String.fromCharCode(65+i)}</span><span>${opt}</span>`;
+        container.appendChild(div);
     });
-    document.getElementById('counterDisplay').innerText = `Question ${index+1} / ${QUIZ_DATA.length}`;
-    updateRingPercent(0);
-    document.getElementById('transcriptBox').innerHTML = '📝 your speech will appear here';
-    document.getElementById('levFeedback').innerHTML = '';
-    document.getElementById('recordingStatus').innerHTML = '🎤 ready';
-    if (recognition && isListening) { try { recognition.abort(); } catch(e) {} isListening = false; }
-}
-
-// Speech recognition
-function initSpeechRecognition() {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-        alert("Speech recognition not supported. Please use Chrome, Edge, or Safari.");
-        return null;
-    }
-    const recog = new SpeechRecognition();
-    recog.continuous = false;
-    recog.interimResults = false;
-    recog.lang = 'en-US';
-    return recog;
-}
-
-function attachRecognitionEvents() {
-    if (!recognition) return;
-    recognition.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        const confidence = event.results[0][0].confidence;
-        document.getElementById('transcriptBox').innerHTML = `📢 You said: "${transcript}" ${confidence > 0.7 ? '✅' : '🎧'}`;
-        const percent = computeSimilarityPercent(transcript, currentTargetAnswer);
-        updateRingPercent(percent);
-        
-        if (!firstAttemptMade && percent < 100) {
-            showHint();
-        }
-        firstAttemptMade = true;
-        
-        let feedbackMsg = '';
-        if (percent === 100) feedbackMsg = '🎉 Perfect pronunciation! Ring full!';
-        else if (percent >= 75) feedbackMsg = `👍 Very good! ${percent}% match.`;
-        else if (percent >= 50) feedbackMsg = `📖 ${percent}% accuracy, keep practicing.`;
-        else feedbackMsg = `🔊 ${percent}% match — try again.`;
-        document.getElementById('levFeedback').innerHTML = `<i class="fas fa-comment-dots"></i> ${feedbackMsg}`;
-        document.getElementById('recordingStatus').innerHTML = '✅ Speech captured.';
-        
-        const currentId = QUIZ_DATA[currentQuestionIndex].id;
-        const vocabKey = QUIZ_DATA[currentQuestionIndex].vocabKey;
-        sendPronunciationStatement(currentId, vocabKey, transcript, currentTargetAnswer, percent);
-        isListening = false;
-    };
-    recognition.onerror = (event) => {
-        console.error(event.error);
-        document.getElementById('recordingStatus').innerHTML = `⚠️ Error: ${event.error}`;
-        isListening = false;
-    };
-    recognition.onend = () => { if(!isListening) document.getElementById('recordingStatus').innerHTML = '🎤 ready'; isListening = false; };
-}
-
-function startListening() {
-    if (!recognition) {
-        recognition = initSpeechRecognition();
-        if (!recognition) return;
-        attachRecognitionEvents();
-    }
-    if (isListening) return;
-    document.getElementById('recordingStatus').innerHTML = '<i class="fas fa-microphone-slash"></i> Listening... speak now!';
-    document.getElementById('transcriptBox').innerHTML = '🎙️ listening...';
-    recognition.start();
-    isListening = true;
-}
-
-// Navegación
-function nextQuestion() {
-    if (currentQuestionIndex + 1 < QUIZ_DATA.length) {
-        currentQuestionIndex++;
-        loadQuestion(currentQuestionIndex);
-    } else {
-        document.getElementById('levFeedback').innerHTML = '✨ Quiz completed! ✨ Statements sent to LRS.';
-        sendStatement("http://adlnet.gov/expapi/verbs/completed", window.location.href, { completion: true });
-    }
-}
-function prevQuestion() {
-    if (currentQuestionIndex > 0) {
-        currentQuestionIndex--;
-        loadQuestion(currentQuestionIndex);
-    }
-}
-
-// Iniciar el quiz después de validar el modal
-function startQuizWithLearner() {
-    console.log("startQuizWithLearner called");
-    const nameInput = document.getElementById('learnerName');
-    const emailInput = document.getElementById('learnerEmail');
-    
-    if (!nameInput || !emailInput) {
-        console.error("No se encontraron los campos del modal");
-        document.getElementById('modalError').innerText = "Error interno: campos no encontrados.";
-        return;
-    }
-    
-    const name = nameInput.value.trim();
-    const email = emailInput.value.trim();
-    
-    if (!name || !email) {
-        document.getElementById('modalError').innerText = "Debes ingresar nombre y email.";
-        return;
-    }
-    if (!email.includes('@')) {
-        document.getElementById('modalError').innerText = "Email inválido.";
-        return;
-    }
-    
-    learner.name = name;
-    learner.email = email;
-    
-    // Inicializar LRS (no debe bloquear el inicio del quiz)
-    tincan = initXAPI();
-    if (tincan) {
-        sendStatement("http://adlnet.gov/expapi/verbs/initialized", window.location.href, { completion: false });
-    } else {
-        console.warn("Continuando sin LRS");
-    }
-    
-    // Ocultar modal y mostrar quiz
-    const modal = document.getElementById('learnerModal');
-    const quizApp = document.getElementById('quizApp');
-    if (modal) modal.style.display = 'none';
-    if (quizApp) quizApp.style.display = 'block';
-    
-    currentQuestionIndex = 0;
-    loadQuestion(0);
-}
-
-// Event binding con verificación de existencia de elementos
-document.addEventListener('DOMContentLoaded', () => {
-    console.log("DOM ready");
-    const startBtn = document.getElementById('startQuizBtn');
-    const speakBtn = document.getElementById('speakBtn');
-    const prevBtn = document.getElementById('prevBtn');
-    const nextBtn = document.getElementById('nextBtn');
-    
-    if (startBtn) {
-        startBtn.addEventListener('click', startQuizWithLearner);
-    } else {
-        console.error("No se encontró el botón 'startQuizBtn'");
-    }
-    
-    if (speakBtn) speakBtn.addEventListener('click', startListening);
-    if (prevBtn) prevBtn.addEventListener('click', prevQuestion);
-    if (nextBtn) nextBtn.addEventListener('click', nextQuestion);
-    
     drawRing(0);
-});
+}
+
+// =========================== INIT ===========================
+window.onload = () => {
+    initSpeech();
+
+    document.getElementById('startBtn').onclick = () => {
+        const n = document.getElementById('userName').value.trim();
+        const e = document.getElementById('userEmail').value.trim();
+        if (!n || !e.includes('@')) return alert("Enter valid Name and Email");
+        
+        currentUser = { name: n, email: e };
+        document.getElementById('learnerModal').style.display = 'none';
+        document.getElementById('quizApp').style.display = 'block';
+        
+        let stmt = getBaseStatement("initialized", "http://adlnet.gov/expapi/verbs/initialized");
+        stmt.object = { id: "https://lab.edu/cutlery/quiz" };
+        sendXAPI(stmt);
+        loadQuestion(0);
+    };
+
+    document.getElementById('record-btn').onclick = () => {
+        if (!isRecording) recognition.start();
+    };
+
+    document.getElementById('nextBtn').onclick = () => {
+        if (currentQuestionIndex < QUIZ_DATA.length - 1) {
+            currentQuestionIndex++;
+            loadQuestion(currentQuestionIndex);
+        }
+    };
+
+    document.getElementById('prevBtn').onclick = () => {
+        if (currentQuestionIndex > 0) {
+            currentQuestionIndex--;
+            loadQuestion(currentQuestionIndex);
+        }
+    };
+
+    document.getElementById('end-session-btn').onclick = () => {
+        let stmt = getBaseStatement("completed", "http://adlnet.gov/expapi/verbs/completed");
+        stmt.object = { id: "https://lab.edu/cutlery/quiz" };
+        stmt.result = { score: { scaled: stats.correct/QUIZ_DATA.length } };
+        sendXAPI(stmt);
+        location.reload();
+    };
+};
