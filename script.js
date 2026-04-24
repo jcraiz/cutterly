@@ -15,12 +15,10 @@ let quizData = null;
 let recognition = null;
 let isListening = false;
 let currentTargetAnswer = "";
-// NEW: track if hint has been shown for current question
 let hintRevealedForCurrentQuestion = false;
-// NEW: track if this is the first attempt for current question (to avoid double reveal)
 let firstAttemptMade = false;
 
-// Quiz questions (same as before)
+// Quiz questions
 const QUIZ_DATA = [
     { id: 1, text: "What do you use to cut meat?", icon: "🥩", options: ["I use a knife.", "I use a fork.", "I use a towel."], correctAnswer: "I use a knife.", vocabKey: "knife" },
     { id: 2, text: "What do you use to eat soup?", icon: "🥣", options: ["I use a spoon.", "I use a fork.", "I use chopsticks."], correctAnswer: "I use a spoon.", vocabKey: "spoon" },
@@ -90,19 +88,30 @@ function drawRing(percent) {
 }
 function updateRingPercent(percent) { drawRing(percent); }
 
-// ---------- xAPI statement helpers ----------
+// ---------- xAPI statement helpers (con manejo de errores) ----------
 function initXAPI() {
-    if (!LRS_CONFIG.endpoint || LRS_CONFIG.endpoint === "https://your-lrs.lrs.io/xapi/") {
-        console.warn("LRS not configured: statements will not be sent.");
+    // Verificar si TinCan está disponible
+    if (typeof TinCan === 'undefined') {
+        console.warn("TinCan.js no está cargado. Las declaraciones xAPI no se enviarán.");
         return null;
     }
-    const lrs = new TinCan.LRS({
-        endpoint: LRS_CONFIG.endpoint,
-        username: LRS_CONFIG.username,
-        password: LRS_CONFIG.password,
-        allowFail: true
-    });
-    return lrs;
+    if (!LRS_CONFIG.endpoint || LRS_CONFIG.endpoint === "https://your-lrs.lrs.io/xapi/") {
+        console.warn("LRS no configurado. Las declaraciones xAPI no se enviarán.");
+        return null;
+    }
+    try {
+        const lrs = new TinCan.LRS({
+            endpoint: LRS_CONFIG.endpoint,
+            username: LRS_CONFIG.username,
+            password: LRS_CONFIG.password,
+            allowFail: true
+        });
+        console.log("LRS inicializado correctamente");
+        return lrs;
+    } catch (error) {
+        console.error("Error al inicializar LRS:", error);
+        return null;
+    }
 }
 
 function getAgent() {
@@ -113,16 +122,24 @@ function getAgent() {
 }
 
 function sendStatement(verbId, objectId, resultObj = null, extensions = {}) {
-    if (!tincan) return Promise.resolve();
-    const actor = getAgent();
-    const verb = new TinCan.Verb({ id: verbId });
-    const object = new TinCan.Activity({ id: objectId, definition: { name: { "en-US": "Pronunciation Quiz" } } });
-    const statement = new TinCan.Statement({ actor, verb, object });
-    if (resultObj) {
-        statement.result = new TinCan.Result(resultObj);
-        if (Object.keys(extensions).length) statement.result.extensions = extensions;
+    if (!tincan) {
+        console.warn("No hay conexión LRS, no se envía statement");
+        return Promise.resolve();
     }
-    return tincan.saveStatement(statement).catch(err => console.warn("xAPI error:", err));
+    try {
+        const actor = getAgent();
+        const verb = new TinCan.Verb({ id: verbId });
+        const object = new TinCan.Activity({ id: objectId, definition: { name: { "en-US": "Pronunciation Quiz" } } });
+        const statement = new TinCan.Statement({ actor, verb, object });
+        if (resultObj) {
+            statement.result = new TinCan.Result(resultObj);
+            if (Object.keys(extensions).length) statement.result.extensions = extensions;
+        }
+        return tincan.saveStatement(statement).catch(err => console.warn("xAPI error:", err));
+    } catch (e) {
+        console.error("Error construyendo statement:", e);
+        return Promise.resolve();
+    }
 }
 
 function sendPronunciationStatement(questionId, vocabKey, spokenText, targetText, scorePercent) {
@@ -141,7 +158,7 @@ function sendPronunciationStatement(questionId, vocabKey, spokenText, targetText
     sendStatement("http://adlnet.gov/expapi/verbs/answered", activityId, result, extensions);
 }
 
-// NEW: Show the hint (correct target sentence) to the user
+// Mostrar la pista (solo después del primer error)
 function showHint() {
     const hintEl = document.getElementById('targetPhrasePreview');
     if (hintEl && hintEl.style.display === 'none') {
@@ -150,7 +167,6 @@ function showHint() {
     }
 }
 
-// NEW: Hide hint and reset flags when loading a new question
 function resetHintForNewQuestion() {
     const hintEl = document.getElementById('targetPhrasePreview');
     if (hintEl) hintEl.style.display = 'none';
@@ -158,16 +174,14 @@ function resetHintForNewQuestion() {
     firstAttemptMade = false;
 }
 
-// Load question with hint hidden
+// Cargar pregunta
 function loadQuestion(index) {
     const q = QUIZ_DATA[index];
     document.getElementById('questionText').innerText = q.text;
     document.getElementById('questionIcon').innerText = q.icon;
     currentTargetAnswer = q.correctAnswer;
-    // Update hidden hint content (but keep hidden)
     const hintEl = document.getElementById('targetPhrasePreview');
     hintEl.innerText = `"${currentTargetAnswer}"`;
-    // Ensure hint is hidden for fresh question
     resetHintForNewQuestion();
     
     const optionsContainer = document.getElementById('optionsContainer');
@@ -210,22 +224,19 @@ function attachRecognitionEvents() {
         const percent = computeSimilarityPercent(transcript, currentTargetAnswer);
         updateRingPercent(percent);
         
-        // NEW: If this is the first attempt AND not perfect, show hint
         if (!firstAttemptMade && percent < 100) {
             showHint();
         }
-        // Mark first attempt as done (so hint won't be shown again for this question even if they try again)
         firstAttemptMade = true;
         
         let feedbackMsg = '';
         if (percent === 100) feedbackMsg = '🎉 Perfect pronunciation! Ring full!';
         else if (percent >= 75) feedbackMsg = `👍 Very good! ${percent}% match.`;
         else if (percent >= 50) feedbackMsg = `📖 ${percent}% accuracy, keep practicing.`;
-        else feedbackMsg = `🔊 ${percent}% match — try: "${currentTargetAnswer}".`;
+        else feedbackMsg = `🔊 ${percent}% match — try again.`;
         document.getElementById('levFeedback').innerHTML = `<i class="fas fa-comment-dots"></i> ${feedbackMsg}`;
         document.getElementById('recordingStatus').innerHTML = '✅ Speech captured.';
         
-        // Send xAPI statement
         const currentId = QUIZ_DATA[currentQuestionIndex].id;
         const vocabKey = QUIZ_DATA[currentQuestionIndex].vocabKey;
         sendPronunciationStatement(currentId, vocabKey, transcript, currentTargetAnswer, percent);
@@ -252,7 +263,7 @@ function startListening() {
     isListening = true;
 }
 
-// Navigation
+// Navegación
 function nextQuestion() {
     if (currentQuestionIndex + 1 < QUIZ_DATA.length) {
         currentQuestionIndex++;
@@ -269,33 +280,68 @@ function prevQuestion() {
     }
 }
 
-// Start quiz after modal validation
+// Iniciar el quiz después de validar el modal
 function startQuizWithLearner() {
-    const nameInput = document.getElementById('learnerName').value.trim();
-    const emailInput = document.getElementById('learnerEmail').value.trim();
+    console.log("startQuizWithLearner called");
+    const nameInput = document.getElementById('learnerName');
+    const emailInput = document.getElementById('learnerEmail');
+    
     if (!nameInput || !emailInput) {
-        document.getElementById('modalError').innerText = "Both name and email are required.";
+        console.error("No se encontraron los campos del modal");
+        document.getElementById('modalError').innerText = "Error interno: campos no encontrados.";
         return;
     }
-    if (!emailInput.includes('@')) {
-        document.getElementById('modalError').innerText = "Please enter a valid email address.";
+    
+    const name = nameInput.value.trim();
+    const email = emailInput.value.trim();
+    
+    if (!name || !email) {
+        document.getElementById('modalError').innerText = "Debes ingresar nombre y email.";
         return;
     }
-    learner.name = nameInput;
-    learner.email = emailInput;
+    if (!email.includes('@')) {
+        document.getElementById('modalError').innerText = "Email inválido.";
+        return;
+    }
+    
+    learner.name = name;
+    learner.email = email;
+    
+    // Inicializar LRS (no debe bloquear el inicio del quiz)
     tincan = initXAPI();
-    sendStatement("http://adlnet.gov/expapi/verbs/initialized", window.location.href, { completion: false });
-    document.getElementById('learnerModal').style.display = 'none';
-    document.getElementById('quizApp').style.display = 'block';
+    if (tincan) {
+        sendStatement("http://adlnet.gov/expapi/verbs/initialized", window.location.href, { completion: false });
+    } else {
+        console.warn("Continuando sin LRS");
+    }
+    
+    // Ocultar modal y mostrar quiz
+    const modal = document.getElementById('learnerModal');
+    const quizApp = document.getElementById('quizApp');
+    if (modal) modal.style.display = 'none';
+    if (quizApp) quizApp.style.display = 'block';
+    
     currentQuestionIndex = 0;
     loadQuestion(0);
 }
 
-// Event binding
+// Event binding con verificación de existencia de elementos
 document.addEventListener('DOMContentLoaded', () => {
-    document.getElementById('startQuizBtn').addEventListener('click', startQuizWithLearner);
-    document.getElementById('speakBtn').addEventListener('click', startListening);
-    document.getElementById('prevBtn').addEventListener('click', prevQuestion);
-    document.getElementById('nextBtn').addEventListener('click', nextQuestion);
+    console.log("DOM ready");
+    const startBtn = document.getElementById('startQuizBtn');
+    const speakBtn = document.getElementById('speakBtn');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    
+    if (startBtn) {
+        startBtn.addEventListener('click', startQuizWithLearner);
+    } else {
+        console.error("No se encontró el botón 'startQuizBtn'");
+    }
+    
+    if (speakBtn) speakBtn.addEventListener('click', startListening);
+    if (prevBtn) prevBtn.addEventListener('click', prevQuestion);
+    if (nextBtn) nextBtn.addEventListener('click', nextQuestion);
+    
     drawRing(0);
 });
